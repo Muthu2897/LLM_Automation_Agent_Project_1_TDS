@@ -1,4 +1,6 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, JSONResponse
+import mimetypes
 import os
 import json
 import subprocess
@@ -10,7 +12,9 @@ from datetime import datetime
 
 
 app = FastAPI()
-DATA_DIR = "C:/Users/Muthu/LLM_Automation_Agent_Project_1_TDS/data"
+# Use a relative path for the data directory
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # Get current script directory
+DATA_DIR = os.path.join(BASE_DIR, "data")  # Point to the `data` folder
 
 # Utility function to ensure security constraints
 def is_safe_path(path):
@@ -28,16 +32,26 @@ def parse_date(date_str):
 @app.post("/run")
 def run_task(task: str):
     try:
-        if "install uv and run datagen.py" in task.lower():
+        if "install uv" in task.lower() and "datagen.py" in task.lower():
             subprocess.run(["pip", "install", "uv"], check=True)
             subprocess.run(["python", "datagen.py", os.environ.get("USER_EMAIL", "test@example.com")], check=True)
         
         elif "format" in task.lower() and "prettier" in task.lower():
-            file_path = f"{DATA_DIR}/format.md"
+            file_path = os.path.join(DATA_DIR, "format.md")
+
             if is_safe_path(file_path) and os.path.exists(file_path):
-                subprocess.run(["npx", "prettier", "--write", file_path], check=True)
+                prettier_path = shutil.which("npx")  # Find npx in the system
+                if not prettier_path:
+                    raise HTTPException(status_code=500, detail="npx not found. Make sure Node.js is installed.")
+
+                # Run Prettier with the full path
+                try:
+                    subprocess.run(["npx", "prettier", "--write", file_path], check=True, shell=True)
+                except Exception as e:
+                    raise HTTPException(status_code=500, detail=f"Prettier formatting failed: {str(e)}")
             else:
                 raise HTTPException(status_code=400, detail="Invalid file path")
+
         
         elif "count wednesdays" in task.lower():
             file_path = f"{DATA_DIR}/dates.txt"
@@ -116,12 +130,36 @@ def run_task(task: str):
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
+'''
+@app.get("/read")
+def read_file(path:str):
+    with open(path,"r") as f:
+        data=f.read()
+    return data
+'''
 @app.get("/read")
 def read_file(path: str):
-    full_path = os.path.join(DATA_DIR, path.lstrip("/"))
-    if is_safe_path(full_path) and os.path.exists(full_path):
-        with open(full_path, "r") as f:
+    # Remove any leading `/data/` or `data/` to make it relative
+    if path.startswith("/data/") or path.startswith("data/"):
+        path = path[len("/data/"):]
+
+    # Create the full absolute path inside DATA_DIR
+    safe_path = os.path.abspath(os.path.join(DATA_DIR, path))
+
+    # Security check: Ensure path is inside DATA_DIR
+    if not is_safe_path(safe_path) or not os.path.exists(safe_path):
+        raise HTTPException(status_code=400, detail="Invalid or missing file path")
+
+    # Handle SQLite `.db` files
+    if safe_path.endswith(".db"):
+        return FileResponse(safe_path, media_type="application/octet-stream", filename=os.path.basename(safe_path))
+
+    # Handle text-based files
+    elif safe_path.endswith((".txt", ".md", ".json", ".csv")):
+        with open(safe_path, "r", encoding="utf-8") as f:
             return f.read()
+
+    # Handle binary files (e.g., images, PDFs)
     else:
-        raise HTTPException(status_code=404, detail="File not found")
+        mime_type, _ = mimetypes.guess_type(safe_path)
+        return FileResponse(safe_path, media_type=mime_type or "application/octet-stream")
